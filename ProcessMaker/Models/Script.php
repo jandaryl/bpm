@@ -3,9 +3,10 @@
 namespace ProcessMaker\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
-use ProcessMaker\Models\EnvironmentVariable;
 use ProcessMaker\Exception\ScriptLanguageNotSupported;
+use ProcessMaker\Models\EnvironmentVariable;
 use ProcessMaker\Traits\SerializeToIso8601;
 
 /**
@@ -39,7 +40,8 @@ use ProcessMaker\Traits\SerializeToIso8601;
 class Script extends Model
 {
     use SerializeToIso8601;
-    use ScriptDockerTrait;
+    use ScriptDockerCopyingFilesTrait;
+    use ScriptDockerBindingFilesTrait;
 
     protected $guarded = [
         'id',
@@ -61,20 +63,13 @@ class Script extends Model
      */
     public static function rules($existing = null)
     {
-        $rules = [
+        $unique = Rule::unique('scripts')->ignore($existing);
+
+        return [
             'key' => 'unique:scripts,key',
-            'title' => 'required|unique:scripts,title',
+            'title' => ['required', 'string', $unique],
             'language' => 'required|in:php,lua'
         ];
-        if ($existing) {
-            // ignore the unique rule for this id
-            $rules['title'] = [
-                'required',
-                'string',
-                Rule::unique('scripts')->ignore($existing->id, 'id')
-            ];
-        }
-        return $rules;
     }
 
     /**
@@ -120,13 +115,13 @@ class Script extends Model
                 break;
             case 'lua':
                 $config = [
-                    'image' => 'processmaker/executor:php',
+                    'image' => 'processmaker/executor:lua',
                     'command' => 'lua5.3 /opt/executor/bootstrap.lua',
                     'parameters' => $variablesParameter,
                     'inputs' => [
                         '/opt/executor/data.json' => json_encode($data),
                         '/opt/executor/config.json' => json_encode($config),
-                        '/opt/executor/script.php' => $code
+                        '/opt/executor/script.lua' => $code
                     ],
                     'outputs' => [
                         'response' => '/opt/executor/output.json'
@@ -137,15 +132,16 @@ class Script extends Model
                 throw new ScriptLanguageNotSupported($language);
         }
 
-        $response = $this->execute($config);
+        $executeMethod = config('app.bpm_scripts_docker_mode')==='binding'
+            ? 'executeBinding' : 'executeCopying';
+        $response = $this->$executeMethod($config);
         $returnCode = $response['returnCode'];
-        $errorContent = $response['output'];
+        $stdOutput = $response['output'];
         $output = $response['outputs']['response'];
-
-        if ($returnCode) {
+        if ($returnCode || $stdOutput) {
             // Has an error code
             return [
-                'output' => implode($errorContent, "\n")
+                'output' => implode($stdOutput, "\n")
             ];
         } else {
             // Success
@@ -166,5 +162,13 @@ class Script extends Model
     public static function scriptFormat2Language($format)
     {
         return static::$scriptFormats[$format];
+    }
+    
+    /**
+     * Get the associated versions
+     */
+    public function versions()
+    {
+        return $this->hasMany(ScriptVersion::class);
     }
 }
